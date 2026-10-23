@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "522624109912",
+    "project_id": "renti-56440",
+    "storage_bucket": "renti-56440.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:522624109912:android:8ec44c684f502f95ba292d",
+        "android_client_info": {
+          "package_name": "com.example.renti"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAoyTwYQueL09eE4PBAFCRNGF6IWDMDKuc"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

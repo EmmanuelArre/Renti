@@ -1,0 +1,238 @@
+rules_version = '2';
+
+// Reglas de seguridad de Renti.
+//
+// - El rol de administrador NO sale del perfil del usuario: existe solo si hay
+//   un documento admins/{uid}, que únicamente se puede crear desde la consola
+//   de Firebase (ninguna regla permite escribir en /admins).
+// - Nadie puede cambiar su propio rol ni su estado de cuenta.
+// - Un arrendador solo toca sus propiedades y no puede aprobarlas.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ------------------------------------------------------------ helpers
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return signedIn() &&
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    function perfil(uid) {
+      return get(/databases/$(database)/documents/usuarios/$(uid)).data;
+    }
+
+    // Cuenta con perfil, activa y con el rol indicado.
+    function esRolActivo(rol) {
+      return signedIn() &&
+        exists(/databases/$(database)/documents/usuarios/$(request.auth.uid)) &&
+        perfil(request.auth.uid).rol == rol &&
+        perfil(request.auth.uid).estado == 'activo';
+    }
+
+    function cuentaActiva() {
+      return signedIn() &&
+        exists(/databases/$(database)/documents/usuarios/$(request.auth.uid)) &&
+        perfil(request.auth.uid).estado == 'activo';
+    }
+
+    function soloCambian(campos) {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(campos);
+    }
+
+    // ------------------------------------------------------------- admins
+    // Solo lectura de la propia entrada; escribir está prohibido.
+    match /admins/{uid} {
+      allow get: if signedIn() && request.auth.uid == uid;
+      allow list, write: if false;
+    }
+
+    // ----------------------------------------------------------- usuarios
+    match /usuarios/{uid} {
+      allow get: if signedIn() && (request.auth.uid == uid || isAdmin());
+      allow list: if isAdmin();
+
+      // Registro: solo el propio uid, solo arrendador/arrendatario, activo.
+      allow create: if signedIn()
+        && request.auth.uid == uid
+        && request.resource.data.uid == uid
+        && request.resource.data.rol in ['arrendador', 'arrendatario']
+        && request.resource.data.estado == 'activo'
+        && request.resource.data.email == request.auth.token.email.lower();
+
+      // El usuario edita su perfil sin tocar rol, estado, email ni proveedor.
+      // El administrador solo puede cambiar el estado (suspender/reactivar).
+      allow update: if signedIn() && (
+        (request.auth.uid == uid
+          && soloCambian(['nombre', 'telefono', 'universidad', 'actualizadoEn']))
+        ||
+        (isAdmin() && soloCambian(['estado', 'actualizadoEn']))
+      );
+      allow delete: if false;
+
+      match /favoritos/{propiedadId} {
+        allow read, create, delete: if signedIn() && request.auth.uid == uid
+          && esRolActivo('arrendatario');
+        allow update: if false;
+      }
+    }
+
+    // --------------------------------------------------------- propiedades
+    match /propiedades/{id} {
+      function esDueno() {
+        return signedIn() && resource.data.propietarioId == request.auth.uid;
+      }
+
+      // Estudiantes: solo aprobadas. Dueño y administrador: todas las suyas / todas.
+      allow read: if signedIn() && (
+        resource.data.moderacion == 'aprobada' || esDueno() || isAdmin()
+      );
+
+      // Se crea siempre "pendiente" y a nombre del arrendador autenticado.
+      allow create: if esRolActivo('arrendador')
+        && request.resource.data.propietarioId == request.auth.uid
+        && request.resource.data.moderacion == 'pendiente'
+        && request.resource.data.estado == 'disponible';
+
+      allow update: if
+        // Dueño: no cambia de propietario, no se auto-aprueba y no edita una
+        // publicación desactivada. Si cambia la moderación solo puede volver
+        // a "pendiente".
+        (esDueno()
+          && cuentaActiva()
+          && request.resource.data.propietarioId == resource.data.propietarioId
+          && resource.data.moderacion != 'desactivada'
+          && (request.resource.data.moderacion == resource.data.moderacion
+              || request.resource.data.moderacion == 'pendiente'))
+        ||
+        // Administrador: solo moderación.
+        (isAdmin() && soloCambian(['moderacion', 'motivoModeracion', 'actualizadoEn']));
+
+      allow delete: if esDueno() && cuentaActiva();
+
+      match /imagenes/{imgId} {
+        function propiedad() {
+          return get(/databases/$(database)/documents/propiedades/$(id)).data;
+        }
+        allow read: if signedIn() && (
+          propiedad().moderacion == 'aprobada'
+          || propiedad().propietarioId == request.auth.uid
+          || isAdmin()
+        );
+        allow write: if signedIn() && propiedad().propietarioId == request.auth.uid;
+      }
+    }
+
+    // --------------------------------------------------------- solicitudes
+    match /solicitudes/{id} {
+      allow read: if signedIn() && (
+        resource.data.arrendatarioId == request.auth.uid
+        || resource.data.arrendadorId == request.auth.uid
+        || isAdmin()
+      );
+
+      // Un estudiante crea una solicitud pendiente a su nombre (id = uid_propiedad).
+      allow create: if esRolActivo('arrendatario')
+        && request.resource.data.arrendatarioId == request.auth.uid
+        && request.resource.data.estado == 'PENDIENTE'
+        && request.resource.data.arrendadorId != request.auth.uid
+        && id == request.auth.uid + '_' + request.resource.data.propiedadId;
+
+      allow update: if signedIn() && (
+        // Estudiante: cancelar una pendiente, o reabrir una cancelada/rechazada.
+        (resource.data.arrendatarioId == request.auth.uid
+          && request.resource.data.arrendatarioId == resource.data.arrendatarioId
+          && request.resource.data.arrendadorId == resource.data.arrendadorId
+          && ((resource.data.estado == 'PENDIENTE'
+                && request.resource.data.estado == 'CANCELADA')
+              || (resource.data.estado in ['CANCELADA', 'RECHAZADA']
+                && request.resource.data.estado == 'PENDIENTE')))
+        ||
+        // Arrendador: responder una pendiente.
+        (resource.data.arrendadorId == request.auth.uid
+          && resource.data.estado == 'PENDIENTE'
+          && request.resource.data.estado in ['ACEPTADA', 'RECHAZADA']
+          && soloCambian(['estado', 'actualizadoEn']))
+      );
+      allow delete: if false;
+    }
+
+    // ------------------------------------------------------- arrendamientos
+    match /arrendamientos/{id} {
+      allow read: if signedIn() && (
+        resource.data.arrendatarioId == request.auth.uid
+        || resource.data.arrendadorId == request.auth.uid
+        || isAdmin()
+      );
+
+      // Solo el arrendador, y solo si la solicitud queda aceptada en la misma
+      // transacción (getAfter lee el estado posterior a la escritura).
+      allow create: if esRolActivo('arrendador')
+        && request.resource.data.arrendadorId == request.auth.uid
+        && getAfter(/databases/$(database)/documents/solicitudes/$(id)).data.estado == 'ACEPTADA'
+        && getAfter(/databases/$(database)/documents/solicitudes/$(id)).data.arrendadorId == request.auth.uid;
+
+      allow update: if signedIn()
+        && resource.data.arrendadorId == request.auth.uid
+        && request.resource.data.estado == 'finalizada'
+        && soloCambian(['estado', 'actualizadoEn']);
+      allow delete: if false;
+    }
+
+    // ------------------------------------------------------------ reportes
+    match /reportes/{id} {
+      allow read: if isAdmin() || (signedIn() && resource.data.reportanteId == request.auth.uid);
+      allow create: if cuentaActiva()
+        && request.resource.data.reportanteId == request.auth.uid
+        && request.resource.data.estado == 'abierto';
+      allow update: if isAdmin()
+        && request.resource.data.estado in ['resuelto', 'descartado']
+        && soloCambian(['estado', 'resolucion', 'actualizadoEn']);
+      allow delete: if false;
+    }
+
+    // ------------------------------------------------------ notificaciones
+    match /notificaciones/{id} {
+      allow read: if signedIn() && resource.data.usuarioId == request.auth.uid;
+      // Cualquiera puede avisar a otra persona, pero firmando con su propio uid.
+      allow create: if (cuentaActiva() || isAdmin())
+        && request.resource.data.origenId == request.auth.uid;
+      allow update: if signedIn()
+        && resource.data.usuarioId == request.auth.uid
+        && soloCambian(['leida']);
+      allow delete: if false;
+    }
+
+    // --------------------------------------------------------------- chats
+    // Id del chat = uids de los dos participantes ordenados y unidos con "_".
+    match /chats/{chatId} {
+      allow read: if signedIn() && request.auth.uid in resource.data.participantes;
+      allow create: if cuentaActiva()
+        && request.auth.uid in request.resource.data.participantes
+        && request.resource.data.participantes.size() == 2;
+      allow update: if signedIn()
+        && request.auth.uid in resource.data.participantes
+        && request.resource.data.participantes == resource.data.participantes;
+      allow delete: if false;
+
+      match /mensajes/{msgId} {
+        function chat() {
+          return get(/databases/$(database)/documents/chats/$(chatId)).data;
+        }
+        allow read: if signedIn() && request.auth.uid in chat().participantes;
+        // El chat se crea en el mismo lote que el primer mensaje.
+        allow create: if cuentaActiva()
+          && request.resource.data.de == request.auth.uid
+          && request.auth.uid in getAfter(/databases/$(database)/documents/chats/$(chatId)).data.participantes;
+        allow update, delete: if false;
+      }
+    }
+
+    // Todo lo demás está cerrado.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
