@@ -154,8 +154,6 @@ Fotografía del equipo o dispositivo donde se observa la aplicación funcionando
 
 Muestra el recorrido desde el inicio de sesión hasta el dashboard, la lista de casas y el formulario de registro.
 
-![Navegación](imagenes/12-navegacion.png)
-
 #### Capturas complementarias del flujo
 
 Las siguientes imágenes permiten observar por separado cada una de las cuatro etapas de navegación.
